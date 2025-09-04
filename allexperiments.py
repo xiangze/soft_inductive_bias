@@ -45,8 +45,9 @@ def exp1_lin_benign(
     n_list: Tuple[int] = (100, 200, 400, 800, 1600),
     sparsity: int = 50,
     noise_std: float = 0.5,
+    debug=False
 ):
-    from sklearn.linear_model import Ridge
+    from sklearn.linear_model import Ridge,LinearRegression
 
     # true sparse weight vector
     w_true = np.zeros(d)
@@ -59,11 +60,14 @@ def exp1_lin_benign(
         Xtr, Xte, ytr, yte = train_test_split(X, y)
 
         # α → 0 interpolation regime
-        lin_interp = Ridge(alpha=1e-12, fit_intercept=False).fit(Xtr, ytr)
+        for i,salpha in enumerate[1e-12,1e-10,1e-8,1e-6]:
+            [(,lin_interps[i]) = Ridge(alpha=salpha, fit_intercept=False).fit(Xtr, ytr)
+
         # slightly regularized baseline
         lin_reg = Ridge(alpha=1.0, fit_intercept=False).fit(Xtr, ytr)
 
-        for tag, mdl in [("interp", lin_interp), ("ridge1", lin_reg)]:
+        #for tag, mdl in [("interp", lin_interp)]+[("ridge1", lin_reg)]:
+        for tag, mdl in [("interp", lin_interp)]+[("ridge1", lin_reg)]:
             results.append(
                 dict(
                     n=n,
@@ -73,12 +77,19 @@ def exp1_lin_benign(
                 )
             )
 
+    if(debug):
+        for tag in ("interp","ridge1"):
+            xs = [r["n"] for r in results if r["regime"] == tag]
+            ys = [r["test_mse"] for r in results if r["regime"] == tag]
+        print(tag,xs,ys)
+
     # plot
     fig, ax = plt.subplots()
     for tag in ("interp", "ridge1"):
         xs = [r["n"] for r in results if r["regime"] == tag]
         ys = [r["test_mse"] for r in results if r["regime"] == tag]
         ax.plot(xs, ys, marker="o", label=tag)
+   
     ax.axhline(noise_std**2, ls="--", lw=1, color="gray", label="noise variance")
     ax.set_xscale("log")
     ax.set_xlabel("train samples n")
@@ -297,7 +308,7 @@ def main():
     args = parser.parse_args()
 
     if args.exp == 1:
-        exp1_lin_benign()
+        exp1_lin_benign(debug=True)
     elif args.exp == 2:
         exp2_krr_dd()
     elif args.exp == 3:
