@@ -42,6 +42,9 @@ try:
 except Exception:
     LogisticRegression = None
 
+import lanczos 
+import hpv
+
 RNG = np.random.default_rng(42)
 
 # ------------- utils ---------------------------------------------------------
@@ -411,7 +414,7 @@ def logistic_train_sgd(Xtr, ytr, Xte, yte, lr, bs, epochs=20, wd=0.0, device="cp
     for _ in range(epochs):
         model.train()
         for xb, yb in tr_loader:
-            xb, yb = xb.to(device), y.to(device) if False else (xb.to(device), yb.to(device))
+            xb, yb = xb.to(device), yb.to(device)
             logits = model.logits(xb)
             loss = F.cross_entropy(logits, yb)
             opt.zero_grad(); loss.backward(); opt.step()
@@ -479,41 +482,50 @@ def hessian_matrix(model, loss_fn, x, y):
     H = torch.stack(H_rows, dim=0)
     return H
 
-def exp_E(device="cpu", n_train=2000, n_test=1000):
+def exp_E(device="cpu", n_train=2000, n_test=1000,itenum=80,simple=False,seed=4):
     """
     Small MLP on MNIST subset; compute approximate Hessian rows to estimate small eigenvalues.
     Correlate fraction of near-zero eigenvalues with generalization gap across checkpoints.
     """
     assert torchvision is not None, "torchvision required"
-    set_seed(4)
+    set_seed(seed)
     train_ds, test_ds = get_mnist(n_train=n_train, n_test=n_test, translate_pixels=0)
     tr = DataLoader(train_ds, batch_size=128, shuffle=True)
     te = DataLoader(test_ds, batch_size=256, shuffle=False)
     model = MLP(in_dim=28*28, n_classes=10, hidden=256).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-
+    loss_fn= F.cross_entropy
     checkpoints = []
     for ep in range(6):
         model.train()
         for x,y in tr: 
             x,y = x.to(device), y.to(device)
-            loss = F.cross_entropy(model(x), y); opt.zero_grad(); loss.backward(); opt.step()
+            loss = loss_fn(model(x),y)
+            opt.zero_grad(); 
+            loss.backward(); 
+            opt.step()
         tr_acc = accuracy_torch(model, tr, device)
         te_acc = accuracy_torch(model, te, device)
         checkpoints.append((ep+1, tr_acc, te_acc))
         print(f"[E] epoch {ep+1}: train={tr_acc:.3f}, test={te_acc:.3f}")
 
-    # pick last minibatch to build Hessian approx
-    x, y = next(iter(tr))
-    x, y = x.to(device)[:64], y.to(device)[:64]
-    H = hessian_matrix(model, lambda logits, yy: F.cross_entropy(logits, yy), x, y)  # m x P
-    # approximate spectrum of H^T H to see number of tiny curvatures
-    HT_H = H.T @ H
-    vals = topk_eigs_symmetric(HT_H.cpu(), k=50)
+    if(simple): #simple approach
+        # pick last minibatch to build Hessian approx
+        x, y = next(iter(tr))
+        x, y = x.to(device)[:64], y.to(device)[:64]
+        # approximate spectrum of H^T H to see number of tiny curvatures
+        H = hessian_matrix(model, lambda logits, yy: loss_fn(logits, yy), x, y)  # m x P
+        HT_H = H.T @ H
+        vals = topk_eigs_symmetric(HT_H.cpu(), k=50)
+    else:
+        #v=hpv.getvec(model,loss,tr)
+        rank_est,vals,vecs= lanczos._get_eigenvecs(device,model,loss_fn,tr,topk=50,m=itenum)
+
     tiny = (vals < 1e-6).sum()
     frac_tiny = tiny / len(vals)
     print(f"[E] tiny-eig fraction (approx) = {frac_tiny:.3f}")
-
+    print(f'rank estimation{rank_est}')
+          
     # plot curve of (epoch vs gen gap) and annotate tiny-eig fraction
     fig, ax = plt.subplots()
     ep = [c[0] for c in checkpoints]
@@ -524,6 +536,19 @@ def exp_E(device="cpu", n_train=2000, n_test=1000):
     save_plot(fig, "critics_E_hessian_deg")
 
 # ------------- main ----------------------------------------------------------
+def main_all():
+    if( torch.cuda.is_available()):
+        device ="cuda"
+        print("device is ",device)        
+        torch.device(device)
+        exp_A(device=device)
+        exp_B(device=device)
+        exp_C(device=device)
+        exp_D(device=device)
+        exp_E(device=device)
+    else:
+        device="cpu"
+        print("device is ",device)        
 
 def main():
     parser = argparse.ArgumentParser()
@@ -532,9 +557,7 @@ def main():
     parser.add_argument("--complexities", type=int, nargs="*", default=[1,2,4,8,16])
     parser.add_argument("--ntrain_list", type=int, nargs="*", default=[200,500,1000,5000])
     args = parser.parse_args()
-
     device = torch.device(args.device if torch.cuda.is_available() or "cpu" in args.device else "cpu")
-
     if args.exp == "A":
         exp_A(device=device)
     elif args.exp == "B":
@@ -545,6 +568,9 @@ def main():
         exp_D(device=device)
     elif args.exp == "E":
         exp_E(device=device)
+    else:
+        main_all()
 
 if __name__ == "__main__":
     main()
+
