@@ -40,7 +40,12 @@ https://docs.google.com/presentation/d/1TLnCElJZAcqm3ZK8ANj3iHNT8-OXl1MHJysPhEto
 - Solomonoff priorを使ったモデルのPAC-Bayes boundの実証(link)
 - 次数に応じた正則化項(事前分布)の類似したより自然な概念の提唱
 - [Surprises in High-Dimensional Ridgeless Least Squares Interpolation]()における　γ=n/p(データ数/パラメータ数)一定、あるいは変化させた場合のDNNでの対応事例
-- 学習データを増やすと性能が悪化する（Effective Model Complexity）現象の再現
+- 学習データを増やすと性能が悪化する（[Effective Model Complexity](https://arxiv.org/abs/1912.02292)）現象の再現
 - SLT(Singular Learning Theory)における描像との対応付け
 - 表現学習でのDNN１層分の表現能力の高さ(微分不可能関数などが近似できる)ことを主張する(既存研究あり)
-
+### exprimantation plans
+- A: 「汎化はパラメータ数でなく“符号長（=KL）”で制御」を圧縮→MDL事前で可視化
+- B: データ側のアルゴリズム的複雑さを段階的に上げると汎化性能が悪化（同じアーキ/optimizerでも）
+- C: ソフト拡張(データの持つ構造) vs ハード共有(畳み込み)でサンプル効率差を比較
+- D: SGDの単純性バイアス：バッチ/学習率でマージンとノルムがどう動くかを観測
+- E: ヘッシアン退化（近零固有値比と汎化ギャップの関係)を小規模で観測
