@@ -147,13 +147,15 @@ def mdl_code_length_bits(n_params: int, nz: int, value_bits: int, index_bits_exa
 # ------------- simple models -------------------------------------------------
 
 class MLP(nn.Module):
-    def __init__(self, in_dim=784, n_classes=10, hidden=512):
+    def __init__(self, in_dim=784, n_classes=10, hidden=512,depth=3):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, n_classes)
         )
+
     def forward(self, x):
         return self.net(x.view(x.size(0), -1))
 
@@ -327,9 +329,11 @@ def train_simple_mlp_classifier(Xtr, ytr, Xte, yte, device, width=512, epochs=20
         te_acc = (model(Xte.to(device)).argmax(1) == yte.to(device)).float().mean().item()
     return tr_acc, te_acc
 
-def exp_B(device="cpu", complexities=(1,2,4,8,16), n_train=5000, n_test=2000, d=100, noise=0.0):
+def exp_B(device="cpu", max_complexity=32, n_train=5000, n_test=2000, d=100, noise=0.0):
     set_seed(1)
     res = []
+    log_max_complexity=int(np.floor(np.log2(max_complexity)))
+    complexities=[2**n for n in range(log_max_complexity)]
     for k in complexities:
         Xtr, ytr = gen_parity_dataset(n_train, d, k, noise=noise)
         Xte, yte = gen_parity_dataset(n_test,  d, k, noise=noise)
@@ -429,7 +433,7 @@ def logistic_train_sgd(Xtr, ytr, Xte, yte, lr, bs, epochs=20, wd=0.0, device="cp
         acc = (pred == yte.numpy()).mean()
     return acc, wnorm, margin
 
-def exp_D(device="cpu"):
+def exp_D(device="cuda"):
     set_seed(3)
     X, y = make_separable_gaussian(n=4000, d=100, margin=1.0)
     Xtr, Xte, ytr, yte = train_test_split(X.numpy(), y.numpy())
@@ -482,7 +486,7 @@ def hessian_matrix(model, loss_fn, x, y):
     H = torch.stack(H_rows, dim=0)
     return H
 
-def exp_E(device="cpu", n_train=2000, n_test=1000,itenum=80,simple=False,seed=4):
+def exp_E_Hessian_deg(device="cpu", n_train=2000, n_test=1000,itenum=80,maxepochs=6,simple=False,seed=4):
     """
     Small MLP on MNIST subset; compute approximate Hessian rows to estimate small eigenvalues.
     Correlate fraction of near-zero eigenvalues with generalization gap across checkpoints.
@@ -492,11 +496,14 @@ def exp_E(device="cpu", n_train=2000, n_test=1000,itenum=80,simple=False,seed=4)
     train_ds, test_ds = get_mnist(n_train=n_train, n_test=n_test, translate_pixels=0)
     tr = DataLoader(train_ds, batch_size=128, shuffle=True)
     te = DataLoader(test_ds, batch_size=256, shuffle=False)
-    model = MLP(in_dim=28*28, n_classes=10, hidden=256).to(device)
+    
+    #model = MLP(in_dim=28*28, n_classes=10, hidden=256).to(device)
+    model = MLP(in_dim=28*28, depth=3,n_classes=10, hidden=256).to(device)
+
     opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     loss_fn= F.cross_entropy
     checkpoints = []
-    for ep in range(6):
+    for ep in range(maxepochs):
         model.train()
         for x,y in tr: 
             x,y = x.to(device), y.to(device)
@@ -533,7 +540,7 @@ def exp_E(device="cpu", n_train=2000, n_test=1000,itenum=80,simple=False,seed=4)
     ax.plot(ep, gap, marker="o")
     ax.set_xlabel("epoch"); ax.set_ylabel("train-test acc gap")
     ax.set_title(f"E) Hessian degeneracy proxy: tiny-eig≈{frac_tiny:.2f}")
-    save_plot(fig, "critics_E_hessian_deg")
+    save_plot(fig, f"critics_E_hessian_deg_epoch{maxepochs}")
 
 # ------------- main ----------------------------------------------------------
 def main_all():
@@ -545,7 +552,7 @@ def main_all():
         exp_B(device=device)
         exp_C(device=device)
         exp_D(device=device)
-        exp_E(device=device)
+        exp_E_Hessian_deg(device=device)
     else:
         device="cpu"
         print("device is ",device)        
@@ -553,21 +560,23 @@ def main_all():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp", type=str, required=True, choices=list("ABCDE"))
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--max_complexity", type=int, default=64)
     parser.add_argument("--complexities", type=int, nargs="*", default=[1,2,4,8,16])
     parser.add_argument("--ntrain_list", type=int, nargs="*", default=[200,500,1000,5000])
+    parser.add_argument("--maxepochs", type=int, default=6)
     args = parser.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() or "cpu" in args.device else "cpu")
     if args.exp == "A":
         exp_A(device=device)
     elif args.exp == "B":
-        exp_B(device=device, complexities=args.complexities)
+        exp_B(device=device, max_complexity=args.max_complexity)
     elif args.exp == "C":
         exp_C(device=device, ntrain_list=args.ntrain_list)
     elif args.exp == "D":
         exp_D(device=device)
     elif args.exp == "E":
-        exp_E(device=device)
+        exp_E_Hessian_deg(device=device,maxepochs=args.maxepochs)
     else:
         main_all()
 
