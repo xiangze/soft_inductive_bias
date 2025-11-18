@@ -10,8 +10,7 @@ https://arxiv.org/abs/2503.02113
 + deviation of PAC-bayes inequiality
 + representaiton learing as DNN specific feature
 
-
-https://zenn.dev/link/comments/156ec4609d55b2 in Japanese
+https://zenn.dev/xiangze/articles/c95b6105f985ae in Japanese
 
 https://docs.google.com/presentation/d/1TLnCElJZAcqm3ZK8ANj3iHNT8-OXl1MHJysPhEto1MI/edit?usp=sharing
 
