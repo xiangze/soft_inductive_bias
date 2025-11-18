@@ -48,7 +48,8 @@ https://docs.google.com/presentation/d/1TLnCElJZAcqm3ZK8ANj3iHNT8-OXl1MHJysPhEto
 - B: データ側のアルゴリズム的複雑さを段階的に上げると汎化性能が悪化（同じアーキ/optimizerでも）
 - C: ソフト拡張(データの持つ構造) vs ハード共有(畳み込み)でサンプル効率差を比較
 - D: SGDの単純性バイアス：バッチ/学習率でマージンとノルムがどう動くかを観測
-- E: ヘッシアン退化（近零固有値比と汎化ギャップの関係)を小規模で観測
+- E: ヘッシアン退化（近零固有値比と汎化ギャップの関係）を小規模で観測
+- F: Deep Double Descent: width sweep × label-noise : 
 
 # 結果
 ## 小規模な場合
@@ -67,3 +68,4 @@ https://docs.google.com/presentation/d/1TLnCElJZAcqm3ZK8ANj3iHNT8-OXl1MHJysPhEto
     ![](figs/critics_E_hessian_deg.png)
     echocs1~6と少ない場合 汎化ギャップは大きくなってしまう。
 
+- F: Deep Double Descent: width sweep × label-noise 

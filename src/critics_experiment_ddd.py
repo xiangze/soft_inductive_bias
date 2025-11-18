@@ -400,7 +400,7 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device if (args.device=="cpu" or torch.cuda.is_available()) else "cpu")
-
+    print("device is ",device)        
     if args.exp == "F":
         exp_F(dataset=args.dataset, device=device, widths=args.widths, noise_list=tuple(args.noise_list))
     elif args.exp == "B":
