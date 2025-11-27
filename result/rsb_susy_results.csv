@@ -1,0 +1,1 @@
+timestamp,dataset,mode,hidden,dropout,wd,lr,batch,epochs,restart_id,train_err,test_err,lambda_max,lambda_min,local_sharpness,susy_broken,ckpt_path,seed

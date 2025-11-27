@@ -43,7 +43,7 @@ https://docs.google.com/presentation/d/1TLnCElJZAcqm3ZK8ANj3iHNT8-OXl1MHJysPhEto
 - SLT(Singular Learning Theory)における描像との対応付け
 - 表現学習でのDNN１層分の表現能力の高さ(微分不可能関数などが近似できる)ことを主張する(既存研究あり)
 ### exprimantation plans
-- A: 「汎化はパラメータ数でなく“符号長（=KL）”で制御」を圧縮→MDL事前で可視化
+- A: 「汎化性能はパラメータ数でなく“符号長（=KL,PAC-MDL bound）”で決まる」パラメータ数、符号長を圧縮→汎化ギャップ(評価誤差-訓練誤差)に対してプロットする
 - B: データ側のアルゴリズム的複雑さを段階的に上げると汎化性能が悪化（同じアーキ/optimizerでも）
 - C: ソフト拡張(データの持つ構造) vs ハード共有(畳み込み)でサンプル効率差を比較
 - D: SGDの単純性バイアス：バッチ/学習率でマージンとノルムがどう動くかを観測
@@ -52,8 +52,9 @@ https://docs.google.com/presentation/d/1TLnCElJZAcqm3ZK8ANj3iHNT8-OXl1MHJysPhEto
 
 # 結果
 ## 小規模な場合
-- A: 「汎化はパラメータ数でなく“符号長（=KL）”で制御」を圧縮→MDL事前で可視化
+- A: 「汎化性能はパラメータ数でなく“符号長（=KL,PAC-MDL bound）”で決まる」パラメータ数、符号長を圧縮→汎化ギャップ(評価誤差-訓練誤差)に対してプロットする
     ![](figs/critics_A_pacmdl.png)
+    
 - B: データ側のアルゴリズム的複雑さを段階的に上げると汎化性能が悪化（同じアーキ/optimizerでも）
     ![](figs/critics_B_complexity.png)
 - C: ソフト拡張(データの持つ構造) vs ハード共有(畳み込み)でサンプル効率差を比較

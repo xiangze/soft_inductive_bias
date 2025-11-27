@@ -1,0 +1,1 @@
+timestamp,model,batch_size,lr,noise_ratio,use_swa,use_sgdr,epochs,test_error,test_loss,hess_lambda_max,local_sharpness_delta,seed

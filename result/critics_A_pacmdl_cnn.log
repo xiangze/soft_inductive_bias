@@ -1,0 +1,18 @@
+[A] empirical CE gap = 0.0639 ,batch_size=128
+[A] trained base: train_acc=0.996, test_acc=0.975
+[A] keep=0.10, q=8bits -> nz=170113, bits=4933312, Δ≈18.8653, qMSE=7.50e-07
+[A] keep=0.10, q=6bits -> nz=170113, bits=4593086, Δ≈18.2031, qMSE=1.24e-05
+[A] keep=0.10, q=4bits -> nz=170113, bits=4252860, Δ≈17.5160, qMSE=3.19e-04
+[A] keep=0.10, q=1bits -> nz=170113, bits=3742521, Δ≈16.4315, qMSE=1.19e-01
+[A] keep=0.20, q=8bits -> nz=340226, bits=9866591, Δ≈26.6795, qMSE=7.76e-07
+[A] keep=0.20, q=6bits -> nz=340226, bits=9186139, Δ≈25.7431, qMSE=1.12e-05
+[A] keep=0.20, q=4bits -> nz=340226, bits=8505687, Δ≈24.7713, qMSE=3.37e-04
+[A] keep=0.20, q=1bits -> nz=340226, bits=7485009, Δ≈23.2375, qMSE=1.24e-01
+[A] keep=0.40, q=8bits -> nz=680452, bits=19733147, Δ≈37.7305, qMSE=7.63e-07
+[A] keep=0.40, q=6bits -> nz=680452, bits=18372243, Δ≈36.4062, qMSE=1.34e-05
+[A] keep=0.40, q=4bits -> nz=680452, bits=17011339, Δ≈35.0319, qMSE=2.53e-04
+[A] keep=0.40, q=1bits -> nz=680452, bits=14969983, Δ≈32.8628, qMSE=1.26e-01
+[A] keep=0.80, q=8bits -> nz=1360904, bits=39466257, Δ≈53.3589, qMSE=7.53e-07
+[A] keep=0.80, q=6bits -> nz=1360904, bits=36744449, Δ≈51.4861, qMSE=1.15e-05
+[A] keep=0.80, q=4bits -> nz=1360904, bits=34022641, Δ≈49.5425, qMSE=1.55e-04
+[A] keep=0.80, q=1bits -> nz=1360904, bits=29939929, Δ≈46.4750, qMSE=1.28e-01
