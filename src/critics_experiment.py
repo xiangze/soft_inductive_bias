@@ -15,11 +15,8 @@ Usage examples:
   python critics_experiments.py --exp D
   python critics_experiments.py --exp E --device cuda
 """
-
 import os, math, argparse, random, time
-from pathlib import Path
 from typing import List, Tuple
-
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -28,223 +25,41 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, Subset
-try:
-    import torchvision
-    import torchvision.transforms as T
-except Exception:
-    torchvision = None
-    T = None
-
-try:
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, log_loss
-    from sklearn.kernel_approximation import RBFSampler
-except Exception:
-    LogisticRegression = None
-
+import torchvision
+import torchvision.transforms as T
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, log_loss
+from sklearn.kernel_approximation import RBFSampler
 import lanczos 
 import hpv
-
-RNG = np.random.default_rng(42)
-
-# ------------- utils ---------------------------------------------------------
-
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-def to_device(x, device):
-    if isinstance(x, (list, tuple)):
-        return [to_device(xx, device) for xx in x]
-    return x.to(device)
-
-def ensure_dir(p: str):
-    Path(p).mkdir(parents=True, exist_ok=True)
-
-def save_plot(fig, name: str):
-    ensure_dir("figs")
-    fig.savefig(Path("figs") / f"{name}.png", dpi=180, bbox_inches="tight")
-
-def train_test_split(X, y, test_frac=0.2):
-    n = len(X)
-    idx = RNG.permutation(n)
-    cut = int(n * (1 - test_frac))
-    return X[idx[:cut]], X[idx[cut:]], y[idx[:cut]], y[idx[cut:]]
-
-def accuracy_torch(model, loader, device):
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            logits = model(x)
-            pred = logits.argmax(1)
-            correct += (pred == y).sum().item()
-            total += y.numel()
-    return correct / total
-
-# ------------- MDL (compression) helpers ------------------------------------
-
-def global_magnitude_prune(model: nn.Module, keep_ratio: float = 0.2):
-    # return mask dict and flattened weight vector after pruning
-    with torch.no_grad():
-        all_weights = torch.cat([p.view(-1).abs() for p in model.parameters() if p.requires_grad])
-        k = max(1, int(len(all_weights) * keep_ratio))
-        thresh = torch.topk(all_weights, k, largest=True).values.min()
-        nz_bits = 0
-        masks = []
-        flat_vals = []
-        for p in model.parameters():
-            if not p.requires_grad: 
-                masks.append(torch.ones_like(p, dtype=torch.bool))
-                flat_vals.append(p.view(-1))
-                continue
-            m = (p.abs() >= thresh)
-            masks.append(m)
-            flat_vals.append(p[m].view(-1))
-        return masks, torch.cat(flat_vals)
-
-def uniform_quantize(x: torch.Tensor, nbits: int = 8):
-    if x.numel() == 0: 
-        return x, 0.0
-    with torch.no_grad():
-        xmin, xmax = x.min().item(), x.max().item()
-        if xmin == xmax:  # constant
-            return torch.zeros_like(x), 0.0
-        qlevels = 2 ** nbits
-        scale = (xmax - xmin) / (qlevels - 1)
-        q = torch.clamp(((x - xmin) / scale).round(), 0, qlevels - 1)
-        x_hat = q * scale + xmin
-        mse = F.mse_loss(x_hat, x).item()
-        return x_hat, mse
-
-def elias_gamma_bits(n: int) -> int:
-    if n <= 0: return 1
-    l = int(math.floor(math.log2(n))) + 1
-    return 2 * l - 1
-
-def mdl_code_length_bits(n_params: int, nz: int, value_bits: int, index_bits_exact=False) -> int:
-    """
-    A simple upper bound of code length:
-      1) encode nz using Elias-gamma
-      2) encode indices: nz * ceil(log2(n_params)) bits (upper bound), or log2(nCr) (tighter)
-      3) encode nonzero values: nz * value_bits
-    """
-    b1 = elias_gamma_bits(max(nz,1))
-    if index_bits_exact and 0 < nz < n_params:
-        # Stirling approx for log2(nCr)
-        def log2fact(m):
-            if m == 0 or m == 1: return 0.0
-            return (m*math.log2(m) - m/math.log(2) + 0.5*math.log2(2*math.pi*m))
-        b2 = int(round(log2fact(n_params) - log2fact(nz) - log2fact(n_params - nz)))
-    else:
-        b2 = nz * math.ceil(math.log2(max(n_params,2)))
-    b3 = nz * value_bits
-    return b1 + b2 + b3
-
-# ------------- simple models -------------------------------------------------
-
-class MLP(nn.Module):
-    def __init__(self, in_dim=784, n_classes=10, hidden=512,depth=3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, n_classes)
-        )
-
-    def forward(self, x):
-        return self.net(x.view(x.size(0), -1))
-
-class SmallCNN(nn.Module):
-    def __init__(self, n_classes=10):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(128*7*7, 256), nn.ReLU(),
-            nn.Linear(256, n_classes)
-        )
-    def forward(self, x):
-        return self.fc(self.conv(x).view(x.size(0), -1))
-
-class MLPNoConv(nn.Module):
-    """For C: a non-convolutional MLP to compare with CNN on translation invariance."""
-    def __init__(self, in_shape=(1,28,28), n_classes=10, width=1024):
-        super().__init__()
-        in_dim = int(np.prod(in_shape))
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, width), nn.ReLU(),
-            nn.Linear(width, width), nn.ReLU(),
-            nn.Linear(width, n_classes)
-        )
-    def forward(self, x):
-        return self.net(x.view(x.size(0), -1))
-
-# ------------- datasets ------------------------------------------------------
-
-def get_mnist(n_train=10000, n_test=2000, translate_pixels=0, flatten=False):
-    assert torchvision is not None, "torchvision is required for MNIST"
-    aug = []
-    if translate_pixels > 0:
-        aug.append(T.RandomAffine(degrees=0, translate=(translate_pixels/28, translate_pixels/28)))
-    aug.append(T.ToTensor())
-    tf_train = T.Compose(aug)
-    tf_test  = T.Compose([T.ToTensor()])
-    train_ds = torchvision.datasets.MNIST(root="data", train=True, download=True, transform=tf_train)
-    test_ds  = torchvision.datasets.MNIST(root="data", train=False, download=True, transform=tf_test)
-    # subsample
-    train_idx = RNG.choice(len(train_ds), n_train, replace=False)
-    test_idx  = RNG.choice(len(test_ds), n_test, replace=False)
-    train_ds = Subset(train_ds, train_idx)
-    test_ds  = Subset(test_ds,  test_idx)
-    return train_ds, test_ds
-
-# ------------- training loop -------------------------------------------------
-
-def train_torch(model, train_loader, test_loader, device, epochs=5, lr=1e-3, wd=0.0):
-    model.to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    for ep in range(epochs):
-        model.train()
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
-            logits = model(x)
-            loss = F.cross_entropy(logits, y)
-            opt.zero_grad(); loss.backward(); opt.step()
-    tr_acc = accuracy_torch(model, train_loader, device)
-    te_acc = accuracy_torch(model, test_loader, device)
-    return tr_acc, te_acc
+import pandas as pd
+import seaborn as sns
+from util import RNG,set_seed,get_mnist,uniform_quantize,mdl_code_length_bits,SmallCNN,train_test_split,save_plot,train_torch
+import lightning_vision as lv
 
 # ------------- A) PAC-MDL (compression) -------------------------------------
 
-def exp_A(device="cpu", model_type="mlp", keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4)):
+def exp_A(device="cpu", model_type="mlp", keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4),batch_size=128):
     """
     Train a small model, compress (prune+quantize), convert compression to MDL bits,
     and compare empirical generalization gap with Catoni-style PAC-Bayes using KL≈bits/ln2.
     """
     set_seed(0)
     train_ds, test_ds = get_mnist(n_train=10000, n_test=2000, translate_pixels=0)
-    bs = 128
-    train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, num_workers=2)
-    test_loader  = DataLoader(test_ds,  batch_size=bs, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=2)
+    test_loader  = DataLoader(test_ds,  batch_size, shuffle=False, num_workers=2)
 
     if model_type == "mlp":
         model = MLP(in_dim=28*28, n_classes=10, hidden=512)
+    elif model_type == "resnet18":
+        model = nn.model.MLP(in_dim=28*28, n_classes=10, hidden=512)
+    elif model_type == "cnn":
+        model = SmallCNN(n_classes=10)
     else:
         model = SmallCNN(n_classes=10)
 
     tr_acc, te_acc = train_torch(model, train_loader, test_loader, device, epochs=6, lr=1e-3, wd=1e-4)
     print(f"[A] trained base: train_acc={tr_acc:.3f}, test_acc={te_acc:.3f}")
-
     # empirical generalization gap by cross-entropy on test/train
     def ce_on(loader):
         model.eval()
@@ -258,39 +73,48 @@ def exp_A(device="cpu", model_type="mlp", keep_ratio_list=(0.1,0.2,0.4,0.8), qua
 
     ce_tr = ce_on(train_loader); ce_te = ce_on(test_loader)
     gap = ce_te - ce_tr
-    print(f"[A] empirical CE gap = {gap:.4f}")
-
     # flatten parameter count
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    rows = []
-    for kr in keep_ratio_list:
-        masks, kept = global_magnitude_prune(model, keep_ratio=kr)
-        nz = kept.numel()
-        for qb in quant_bits:
-            qvals, mse = uniform_quantize(kept.clone(), qb)
-            bits = mdl_code_length_bits(n_params=n_params, nz=nz, value_bits=qb, index_bits_exact=False)
-            # PAC-Bayes bound: Δ ≈ sqrt((KL+ln(2√n/δ))/2(n-1)), KL≈bits/ln2
-            n = len(train_ds)
-            delta = 0.05
-            KL = bits / math.log(2)   # convert bits -> nats
-            bound = math.sqrt((KL + math.log(2*math.sqrt(n)/delta)) / (2*(n-1)))
-            rows.append((kr, qb, nz, bits, bound, mse))
-            print(f"[A] keep={kr:.2f}, q={qb}bits -> nz={nz}, bits={bits}, Δ≈{bound:.4f}, qMSE={mse:.2e}")
+    with open(f"critics_A_pacmdl_{model_type}.log","w") as fp:
+        print(f"[A] empirical CE gap = {gap:.4f}",file=fp)
+        print(f"[batch_size={batch_size}",file=fp)
+        print(f"[A] trained base: train_acc={tr_acc:.3f}, test_acc={te_acc:.3f}",file=fp)
+        rows = []
+        for kr in keep_ratio_list:
+            _, kept = global_magnitude_prune(model, keep_ratio=kr)
+            nz = kept.numel()
+            for qb in quant_bits:
+                _, mse = uniform_quantize(kept.clone(), qb)
+                bits = mdl_code_length_bits(n_params=n_params, nz=nz, value_bits=qb, index_bits_exact=False)
+                # PAC-Bayes bound: Δ ≈ sqrt((KL+ln(2√n/δ))/2(n-1)), KL≈bits/ln2
+                n = len(train_ds)
+                delta = 0.05 #?
+                KL = bits / math.log(2)   # convert bits -> nats
+                bound = math.sqrt((KL + math.log(2*math.sqrt(n)/delta)) / (2*(n-1)))
+                #rows.append((kr, qb, nz, bits, bound, mse))
+                rows.append({"keep_ratio":kr, "quantbit":qb, "kept":nz, "mdlbit":bits, "mdlbound":bound, "mse":mse})
+                print(f"[A] keep={kr:.2f}, q={qb}bits -> nz={nz}, bits={bits}, Δ≈{bound:.4f}, qMSE={mse:.2e}",file=fp)
+    
+    df=pd.DataFrame.from_records(rows)
+    pg=sns.pairplot(df)
+    pg.savefig("")
 
     # quick plot: bound vs keep ratio
     fig, ax = plt.subplots()
     for qb in quant_bits:
-        xs = [r[0] for r in rows if r[1]==qb]
-        ys = [r[4] for r in rows if r[1]==qb]
+        xs = [r["keep_ratio"] for r in rows if r["quantbit"]==qb]
+        ys = [r["mdlbound"] for r in rows if r["quantbit"]==qb]
         ax.plot(xs, ys, marker="o", label=f"{qb} bits")
     ax.set_xlabel("keep ratio (global magnitude prune)")
-    ax.set_ylabel("PAC-MDL bound Δ (approx)")
+    ax.set_ylabel("PAC-MDL bound Δ is(approx)")
     ax.set_title("A) Compression-as-prior PAC-MDL bound")
     ax.legend()
-    save_plot(fig, "critics_A_pacmdl")
+    save_plot(fig, f"critics_A_pacmdl_{model_type}")
 
-# ------------- B) Algorithmic complexity sweep ------------------------------
+# ===================================================
+# B)  Parity complexity + noise + width sweep
+# ===================================================
 
 def gen_parity_dataset(n: int, d: int, k: int, noise=0.0):
     """
@@ -329,63 +153,83 @@ def train_simple_mlp_classifier(Xtr, ytr, Xte, yte, device, width=512, epochs=20
         te_acc = (model(Xte.to(device)).argmax(1) == yte.to(device)).float().mean().item()
     return tr_acc, te_acc
 
-def exp_B(device="cpu", max_complexity=32, n_train=5000, n_test=2000, d=100, noise=0.0):
+def exp_B(device="cpu", complexities=(1,2,4,8,16), n_train=5000, n_test=2000, d=100,
+          noise_list=(0.0, 0.2, 0.4), widths=(64,128,256,512), epochs=15, lr=1e-3):
     set_seed(1)
-    res = []
-    log_max_complexity=int(np.floor(np.log2(max_complexity)))
-    complexities=[2**n for n in range(log_max_complexity)]
-    for k in complexities:
-        Xtr, ytr = gen_parity_dataset(n_train, d, k, noise=noise)
-        Xte, yte = gen_parity_dataset(n_test,  d, k, noise=noise)
-        tr_acc, te_acc = train_simple_mlp_classifier(Xtr, ytr, Xte, yte, device, width=512, epochs=15)
-        res.append((k, tr_acc, te_acc))
-        print(f"[B] k={k}: train_acc={tr_acc:.3f}, test_acc={te_acc:.3f}")
-    # plot
-    fig, ax = plt.subplots()
-    ax.plot([r[0] for r in res], [1-r[2] for r in res], marker="o")
-    ax.set_xlabel("parity complexity k (number of bits)")
-    ax.set_ylabel("test error")
-    ax.set_title("B) Data algorithmic complexity sweep")
-    save_plot(fig, "critics_B_complexity")
+    for noise in noise_list:
+        res = []
+        for k in complexities:
+            # under- to over-param by width; record best and peak behavior
+            test_err_vs_width = []
+            for w in widths:
+                in_dim = d
+                model = nn.Sequential(
+                    nn.Linear(in_dim, w), nn.ReLU(),
+                    nn.Linear(w, w), nn.ReLU(),
+                    nn.Linear(w, 2)
+                ).to(device)
+                Xtr, ytr = gen_parity_dataset(n_train, d, k, noise=noise)
+                Xte, yte = gen_parity_dataset(n_test,  d, k, noise=noise)
+                tr_loader = DataLoader(TensorDataset(Xtr, ytr), batch_size=128, shuffle=True)
+                te_loader = DataLoader(TensorDataset(Xte, yte), batch_size=256, shuffle=False)
+                _ = train_torch(model, tr_loader, te_loader, device, epochs=epochs, lr=lr, wd=0.0)
+                te_acc = accuracy_torch(model, te_loader, device)
+                test_err_vs_width.append(1 - te_acc)
+            # Store minimal test error and location of peak/criticality proxy
+            min_err = float(np.min(test_err_vs_width))
+            peak_err = float(np.max(test_err_vs_width))
+            peak_at  = widths[int(np.argmax(test_err_vs_width))]
+            res.append((k, min_err, peak_err, peak_at))
+            print(f"[B] noise={noise:.2f}, k={k}: min={min_err:.3f}, peak={peak_err:.3f} @ width={peak_at}")
+        # plot: peak_at vs k (should shift left with more noise)
+        fig, ax = plt.subplots()
+        ax.plot([r[0] for r in res], [r[3] for r in res], marker="o")
+        ax.set_xlabel("parity complexity k")
+        ax.set_ylabel("width at peak test error (critical region proxy)")
+        ax.set_title(f"B) critical-region shift vs k @ noise={noise}")
+        save_plot(fig, f"B_parity_critical_shift_noise{int(100*noise)}")
 
-# ------------- C) Soft vs Hard bias (augmentation vs conv) -------------------
+# ===================================================
+# C) UPDATED: Soft vs Hard bias with label noise
+# ===================================================
 
-def exp_C(device="cpu", ntrain_list=(200, 500, 1000, 5000), translate_pixels=3):
+def get_mnist_subset(n, translate_pixels):
+    return get_mnist(n_train=n, n_test=2000, translate_pixels=translate_pixels)
+
+def exp_C(device="cpu", ntrain_list=(200, 500, 1000, 5000), translate_pixels=3,
+          noise_list=(0.0, 0.2, 0.4), epochs=6, lr=1e-3):
     """
-    Compare:
-      - MLP without weight sharing, but with translation augmentation (soft bias)
-      - CNN with weight sharing, minimal/no augmentation (hard bias)
-    Measure sample efficiency on MNIST.
+    Compare soft bias (MLP+augmentation) vs hard bias (CNN) under label noise.
+    Expectation: with noise, test error increases and the data-efficiency gap can widen;
+    also augmentation interacts with noise (too strong aug may hurt when labels are noisy).
     """
     set_seed(2)
-    out = []
-    for ntr in ntrain_list:
-        # soft: MLP with strong translation augmentation
-        train_ds_soft, test_ds = get_mnist(n_train=ntr, n_test=2000, translate_pixels=translate_pixels)
-        train_ds_hard, _       = get_mnist(n_train=ntr, n_test=2000, translate_pixels=0)
-        bs = 128
-        tr_soft = DataLoader(train_ds_soft, batch_size=bs, shuffle=True)
-        tr_hard = DataLoader(train_ds_hard, batch_size=bs, shuffle=True)
-        te = DataLoader(test_ds, batch_size=bs, shuffle=False)
+    for noise in noise_list:
+        out = []
+        for ntr in ntrain_list:
+            tr_soft_sub, te_sub = get_mnist_subset(ntr, translate_pixels=translate_pixels)
+            tr_hard_sub, _      = get_mnist_subset(ntr, translate_pixels=0)
+            tr_soft = build_loader_from_subset(tr_soft_sub, batch_size=128, noise=noise, n_classes=10, shuffle=True)
+            tr_hard = build_loader_from_subset(tr_hard_sub, batch_size=128, noise=noise, n_classes=10, shuffle=True)
+            te = build_loader_from_subset(te_sub, batch_size=256, noise=0.0, n_classes=10, shuffle=False)
 
-        mlp = MLPNoConv(in_shape=(1,28,28), n_classes=10, width=1024)
-        cnn = SmallCNN(n_classes=10)
+            mlp = MLPNoConv(in_shape=(1,28,28), n_classes=10, width=1024, depth=2)
+            cnn = SmallCNN(n_classes=10, base=32)
 
-        tr_acc_s, te_acc_s = train_torch(mlp, tr_soft, te, device, epochs=6, lr=1e-3, wd=1e-4)
-        tr_acc_h, te_acc_h = train_torch(cnn, tr_hard, te, device, epochs=6, lr=1e-3, wd=1e-4)
+            _, te_acc_s = train_torch(mlp, tr_soft, te, device, epochs=epochs, lr=lr, wd=1e-4)
+            _, te_acc_h = train_torch(cnn, tr_hard, te, device, epochs=epochs, lr=lr, wd=1e-4)
+            out.append((ntr, te_acc_s, te_acc_h))
+            print(f"[C] noise={noise:.2f}, n={ntr}: soft={te_acc_s:.3f} | hard={te_acc_h:.3f}")
 
-        out.append((ntr, te_acc_s, te_acc_h))
-        print(f"[C] n={ntr}: soft(MLP+aug) test={te_acc_s:.3f} | hard(CNN) test={te_acc_h:.3f}")
-
-    fig, ax = plt.subplots()
-    ax.plot([o[0] for o in out], [o[1] for o in out], marker="o", label="soft: MLP+aug")
-    ax.plot([o[0] for o in out], [o[2] for o in out], marker="x", label="hard: CNN")
-    ax.set_xscale("log")
-    ax.set_xlabel("train size")
-    ax.set_ylabel("test accuracy")
-    ax.set_title("C) Soft vs Hard inductive bias (sample efficiency)")
-    ax.legend()
-    save_plot(fig, "critics_C_soft_vs_hard")
+        fig, ax = plt.subplots()
+        ax.plot([o[0] for o in out], [1-o[1] for o in out], marker="o", label="soft: MLP+aug")
+        ax.plot([o[0] for o in out], [1-o[2] for o in out], marker="x", label="hard: CNN")
+        ax.set_xscale("log")
+        ax.set_xlabel("train size")
+        ax.set_ylabel("test error")
+        ax.set_title(f"C) soft vs hard under label noise={noise}")
+        ax.legend()
+        save_plot(fig, f"C_soft_vs_hard_noise{int(100*noise)}")
 
 # ------------- D) SGD simplicity bias ---------------------------------------
 
@@ -542,6 +386,44 @@ def exp_E_Hessian_deg(device="cpu", n_train=2000, n_test=1000,itenum=80,maxepoch
     ax.set_title(f"E) Hessian degeneracy proxy: tiny-eig≈{frac_tiny:.2f}")
     save_plot(fig, f"critics_E_hessian_deg_epoch{maxepochs}")
 
+# ===================================================
+# F) Deep Double Descent: width sweep × label-noise
+# ===================================================
+
+def exp_F(dataset="mnist", device="cpu",
+          widths=(32, 64, 128, 256, 512, 1024, 2048),
+          noise_list=(0.0, 0.2, 0.4),
+          n_train=20000, n_test=5000, epochs=8, lr=1e-3):
+    """
+    Reproduce DDD by sweeping model width (capacity) at multiple label-noise rates.
+    Expectation: higher noise -> test error peak higher and shifts to smaller width (earlier).
+    """
+    set_seed(0)
+    if dataset.lower() == "mnist":
+        train_sub, test_sub = get_mnist(n_train=n_train, n_test=n_test)
+        n_classes = 10
+        in_dim = 28*28
+    else:
+        raise ValueError("Only mnist is included for a fast demo.")
+
+    fig, ax = plt.subplots()
+    for noise in noise_list:
+        tr_loader = build_loader_from_subset(train_sub, batch_size=128, noise=noise, n_classes=n_classes, shuffle=True)
+        te_loader = build_loader_from_subset(test_sub,  batch_size=256, noise=0.0,   n_classes=n_classes, shuffle=False)  # test is clean
+        test_errs, train_errs = [], []
+        for w in widths:
+            model = MLP(in_dim=in_dim, n_classes=n_classes, width=w, depth=3).to(device)
+            tr_acc, te_acc = train_torch(model, tr_loader, te_loader, device, epochs=epochs, lr=lr, wd=1e-4)
+            train_errs.append(1 - tr_acc);  test_errs.append(1 - te_acc)
+            print(f"[F] noise={noise:.2f}, width={w}: train={tr_acc:.3f}, test={te_acc:.3f}")
+        ax.plot(widths, test_errs, marker="o", label=f"noise={noise}")
+    ax.set_xscale("log")
+    ax.set_xlabel("width (model capacity)")
+    ax.set_ylabel("test error")
+    ax.set_title("F) Deep Double Descent: width × label-noise (MNIST)")
+    ax.legend()
+    save_plot(fig, "F_ddd_width_noise")
+
 # ------------- main ----------------------------------------------------------
 def main_all():
     if( torch.cuda.is_available()):
@@ -553,6 +435,7 @@ def main_all():
         exp_C(device=device)
         exp_D(device=device)
         exp_E_Hessian_deg(device=device)
+        exp_F(device=device)
     else:
         device="cpu"
         print("device is ",device)        
@@ -568,7 +451,8 @@ def main():
     args = parser.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() or "cpu" in args.device else "cpu")
     if args.exp == "A":
-        exp_A(device=device)
+        exp_A(device=device, keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4,1),batch_size=128,model_type="mlp")
+        exp_A(device=device, keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4,1),batch_size=128,model_type="cnn")
     elif args.exp == "B":
         exp_B(device=device, max_complexity=args.max_complexity)
     elif args.exp == "C":
@@ -577,6 +461,8 @@ def main():
         exp_D(device=device)
     elif args.exp == "E":
         exp_E_Hessian_deg(device=device,maxepochs=args.maxepochs)
+    elif args.exp == "F":
+        exp_F(device=device)        
     else:
         main_all()
 

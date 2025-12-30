@@ -26,186 +26,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, Subset
 
-try:
-    import torchvision
-    import torchvision.transforms as T
-except Exception:
-    torchvision, T = None, None
-
-RNG = np.random.default_rng(0)
-
-# --------------------- utils ---------------------
-
-def set_seed(seed=0):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-def ensure_dir(p: str):
-    Path(p).mkdir(parents=True, exist_ok=True)
-
-def save_plot(fig, name: str):
-    ensure_dir("figs")
-    fig.savefig(Path("figs") / f"{name}.png", dpi=180, bbox_inches="tight")
-
-def train_test_split(X, y, test_frac=0.2):
-    n = len(X)
-    idx = RNG.permutation(n)
-    cut = int(n * (1 - test_frac))
-    return X[idx[:cut]], X[idx[cut:]], y[idx[:cut]], y[idx[cut:]]
-
-def corrupt_labels(y: torch.Tensor, noise: float, n_classes: int):
-    """Flip labels uniformly at rate 'noise'. y: LongTensor (N,) in [0, n_classes-1]."""
-    if noise <= 0: return y.clone()
-    y = y.clone()
-    N = y.numel()
-    m = int(round(noise * N))
-    idx = torch.from_numpy(RNG.choice(N, m, replace=False))
-    noise_vals = torch.from_numpy(RNG.integers(0, n_classes, size=m)).long()
-    # avoid trivial "same label" by resampling if equal
-    same = noise_vals == y[idx]
-    while same.any():
-        noise_vals[same] = torch.from_numpy(RNG.integers(0, n_classes, size=int(same.sum()))).long()
-        same = noise_vals == y[idx]
-    y[idx] = noise_vals
-    return y
-
-def accuracy_torch(model, loader, device):
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            pred = model(x).argmax(1)
-            correct += (pred == y).sum().item()
-            total += y.numel()
-    return correct / total
-
-# --------------------- models ---------------------
-
-class MLP(nn.Module):
-    def __init__(self, in_dim=784, n_classes=10, width=128, depth=2):
-        super().__init__()
-        layers = [nn.Linear(in_dim, width), nn.ReLU()]
-        for _ in range(depth-1):
-            layers += [nn.Linear(width, width), nn.ReLU()]
-        layers += [nn.Linear(width, n_classes)]
-        self.net = nn.Sequential(*layers)
-    def forward(self, x):
-        return self.net(x.view(x.size(0), -1))
-
-class SmallCNN(nn.Module):
-    def __init__(self, n_classes=10, base=32):
-        super().__init__()
-        c1, c2, c3 = base, base*2, base*4
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, c1, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(c1, c2, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(c2, c3, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(c3*7*7, c3*2), nn.ReLU(),
-            nn.Linear(c3*2, n_classes)
-        )
-    def forward(self, x):
-        return self.fc(self.conv(x).view(x.size(0), -1))
-
-class MLPNoConv(nn.Module):
-    def __init__(self, in_shape=(1,28,28), n_classes=10, width=1024, depth=2):
-        super().__init__()
-        in_dim = int(np.prod(in_shape))
-        layers = [nn.Linear(in_dim, width), nn.ReLU()]
-        for _ in range(depth-1):
-            layers += [nn.Linear(width, width), nn.ReLU()]
-        layers += [nn.Linear(width, n_classes)]
-        self.net = nn.Sequential(*layers)
-    def forward(self, x):
-        return self.net(x.view(x.size(0), -1))
-
-# --------------------- data ---------------------
-
-def get_mnist(n_train=20000, n_test=5000, flatten=False, translate_pixels=0):
-    assert torchvision is not None, "torchvision required"
-    aug = []
-    if translate_pixels > 0:
-        aug.append(T.RandomAffine(degrees=0, translate=(translate_pixels/28, translate_pixels/28)))
-    aug.append(T.ToTensor())
-    tf_train = T.Compose(aug)
-    tf_test  = T.Compose([T.ToTensor()])
-    tr = torchvision.datasets.MNIST("data", train=True,  download=True, transform=tf_train)
-    te = torchvision.datasets.MNIST("data", train=False, download=True, transform=tf_test)
-    tr_idx = RNG.choice(len(tr), n_train, replace=False)
-    te_idx = RNG.choice(len(te), n_test,  replace=False)
-    return Subset(tr, tr_idx), Subset(te, te_idx)
-
-def build_loader_from_subset(subset, batch_size, noise=0.0, n_classes=10, shuffle=True):
-    xs, ys = [], []
-    for i in range(len(subset)):
-        x, y = subset[i]
-        xs.append(x)
-        ys.append(y)
-    X = torch.stack(xs)
-    y = torch.tensor(ys, dtype=torch.long)
-    y = corrupt_labels(y, noise=noise, n_classes=n_classes)
-    ds = TensorDataset(X, y)
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=2)
-
-# --------------------- training ---------------------
-
-def train_torch(model, train_loader, test_loader, device, epochs=10, lr=1e-3, wd=0.0):
-    model.to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    for _ in range(epochs):
-        model.train()
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
-            loss = F.cross_entropy(model(x), y)
-            opt.zero_grad(); loss.backward(); opt.step()
-    tr_acc = accuracy_torch(model, train_loader, device)
-    te_acc = accuracy_torch(model, test_loader, device)
-    return tr_acc, te_acc
-
-# ===================================================
-# F) Deep Double Descent: width sweep × label-noise
-# ===================================================
-
-def exp_F(dataset="mnist", device="cpu",
-          widths=(32, 64, 128, 256, 512, 1024, 2048),
-          noise_list=(0.0, 0.2, 0.4),
-          n_train=20000, n_test=5000, epochs=8, lr=1e-3):
-    """
-    Reproduce DDD by sweeping model width (capacity) at multiple label-noise rates.
-    Expectation: higher noise -> test error peak higher and shifts to smaller width (earlier).
-    """
-    set_seed(0)
-    if dataset.lower() == "mnist":
-        train_sub, test_sub = get_mnist(n_train=n_train, n_test=n_test)
-        n_classes = 10
-        in_dim = 28*28
-    else:
-        raise ValueError("Only mnist is included for a fast demo.")
-
-    fig, ax = plt.subplots()
-    for noise in noise_list:
-        tr_loader = build_loader_from_subset(train_sub, batch_size=128, noise=noise, n_classes=n_classes, shuffle=True)
-        te_loader = build_loader_from_subset(test_sub,  batch_size=256, noise=0.0,   n_classes=n_classes, shuffle=False)  # test is clean
-        test_errs, train_errs = [], []
-        for w in widths:
-            model = MLP(in_dim=in_dim, n_classes=n_classes, width=w, depth=3).to(device)
-            tr_acc, te_acc = train_torch(model, tr_loader, te_loader, device, epochs=epochs, lr=lr, wd=1e-4)
-            train_errs.append(1 - tr_acc);  test_errs.append(1 - te_acc)
-            print(f"[F] noise={noise:.2f}, width={w}: train={tr_acc:.3f}, test={te_acc:.3f}")
-        ax.plot(widths, test_errs, marker="o", label=f"noise={noise}")
-    ax.set_xscale("log")
-    ax.set_xlabel("width (model capacity)")
-    ax.set_ylabel("test error")
-    ax.set_title("F) Deep Double Descent: width × label-noise (MNIST)")
-    ax.legend()
-    save_plot(fig, "F_ddd_width_noise")
-
+import torchvision
+import torchvision.transforms as T
+from util import RNG,set_seed,get_mnist,SmallCNN,MLPNoConv,train_test_split,save_plot,train_torch,accuracy_torch,build_loader_from_subset
 # ===================================================
 # B) UPDATED: Parity complexity + noise + width sweep
 # ===================================================
@@ -383,7 +206,6 @@ def main_all():
         exp_B(device=device)
         exp_C(device=device)
         exp_D(device=device)
-        exp_F(device=device)
     else:
         device="cpu"
         print("device is ",device)        
@@ -401,9 +223,7 @@ def main():
 
     device = torch.device(args.device if (args.device=="cpu" or torch.cuda.is_available()) else "cpu")
     print("device is ",device)        
-    if args.exp == "F":
-        exp_F(dataset=args.dataset, device=device, widths=args.widths, noise_list=tuple(args.noise_list))
-    elif args.exp == "B":
+    if args.exp == "B":
         exp_B(device=device, complexities=tuple(args.complexities), noise_list=tuple(args.noise_list))
     elif args.exp == "C":
         exp_C(device=device, ntrain_list=tuple(args.ntrain_list), noise_list=tuple(args.noise_list))
