@@ -34,83 +34,88 @@ import lanczos
 import hpv
 import pandas as pd
 import seaborn as sns
-from util import RNG,set_seed,get_mnist,uniform_quantize,mdl_code_length_bits,SmallCNN,train_test_split,save_plot,train_torch
-import lightning_vision as lv
+import util
+from util import RNG,set_seed,uniform_quantize,mdl_code_length_bits,SmallCNN,train_test_split,save_plot,train_torch
+#import lightning_vision as lv
 
 # ------------- A) PAC-MDL (compression) -------------------------------------
 
-def exp_A(device="cpu", model_type="mlp", keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4),batch_size=128):
+def exp_A(device="cpu", model_type="mlp", keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4),batch_size=128,layernums=[5],dataset="mnist"):
     """
     Train a small model, compress (prune+quantize), convert compression to MDL bits,
     and compare empirical generalization gap with Catoni-style PAC-Bayes using KL≈bits/ln2.
     """
     set_seed(0)
-    train_ds, test_ds = get_mnist(n_train=10000, n_test=2000, translate_pixels=0)
+    image_size=(32,32)
+    if(dataset=="cifar10"):
+        train_ds, test_ds = util.get_cifar10(n_train=10000, n_test=2000,image_size=image_size, translate_pixels=0)
+        chnum=3
+        num_classes=10
+    elif(dataset=="cifar100"):
+        train_ds, test_ds = util.get_cifar100(n_train=10000, n_test=2000,image_size=image_size, translate_pixels=0)
+        chnum=3
+        num_classes=100
+    else:#mnist
+        train_ds, test_ds = util.get_mnist(n_train=10000, n_test=2000,image_size=image_size, translate_pixels=0)
+        chnum=1
+        num_classes=10
+
     train_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=2)
     test_loader  = DataLoader(test_ds,  batch_size, shuffle=False, num_workers=2)
 
-    if model_type == "mlp":
-        model = MLP(in_dim=28*28, n_classes=10, hidden=512)
-    elif model_type == "resnet18":
-        model = nn.model.MLP(in_dim=28*28, n_classes=10, hidden=512)
-    elif model_type == "cnn":
-        model = SmallCNN(n_classes=10)
-    else:
-        model = SmallCNN(n_classes=10)
+    with open(f"critics_A_pacmdl_{model_type}_{dataset}.log","w") as fp:
+        for layernum in layernums:
+            if model_type == "mlp":
+                model = util.MLPClassifier(num_classes=num_classes,image_size=image_size,in_channels=chnum,
+                                           depth=layernum,width=512)
+            elif model_type == "resnet18":
+                model = torchvision.models.resnet18(num_classes=num_classes,in_classes=chnum,image_size=image_size)
+            elif model_type == "cnn":
+                model = util.CNNClassifier(num_classes=10,image_size=image_size,in_channels=chnum,depth=layernum,
+                                            channels=32,channel_mult=2)
+            else:
+                model = util.CNNClassifier(num_classes=10,image_size=image_size,in_channels=chnum,depth=layernum,
+                                            channels=32,channel_mult=2)
 
-    tr_acc, te_acc = train_torch(model, train_loader, test_loader, device, epochs=6, lr=1e-3, wd=1e-4)
-    print(f"[A] trained base: train_acc={tr_acc:.3f}, test_acc={te_acc:.3f}")
-    # empirical generalization gap by cross-entropy on test/train
-    def ce_on(loader):
-        model.eval()
-        tot, n = 0.0, 0
-        with torch.no_grad():
-            for x, y in loader:
-                x, y = x.to(device), y.to(device)
-                ce = F.cross_entropy(model(x), y, reduction="sum").item()
-                tot += ce; n += y.numel()
-        return tot/n
+            tr_acc, te_acc = train_torch(model, train_loader, test_loader, device, epochs=6, lr=1e-3, wd=1e-4)
+            print(f"[A] trained base: train_acc={tr_acc:.3f}, test_acc={te_acc:.3f}")
+            # empirical generalization gap by cross-entropy on test/train
+            def cross_entropy_on(loader):
+                model.eval()
+                tot, n = 0.0, 0
+                with torch.no_grad():
+                    for x, y in loader:
+                        x, y = x.to(device), y.to(device)
+                        ce = F.cross_entropy(model(x), y, reduction="sum").item()
+                        tot += ce; n += y.numel()
+                return tot/n
 
-    ce_tr = ce_on(train_loader); ce_te = ce_on(test_loader)
-    gap = ce_te - ce_tr
-    # flatten parameter count
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            ce_tr = cross_entropy_on(train_loader); ce_te = cross_entropy_on(test_loader)
+            gap = ce_te - ce_tr
+            # flatten parameter count
+            n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    with open(f"critics_A_pacmdl_{model_type}.log","w") as fp:
-        print(f"[A] empirical CE gap = {gap:.4f}",file=fp)
-        print(f"[batch_size={batch_size}",file=fp)
-        print(f"[A] trained base: train_acc={tr_acc:.3f}, test_acc={te_acc:.3f}",file=fp)
-        rows = []
-        for kr in keep_ratio_list:
-            _, kept = global_magnitude_prune(model, keep_ratio=kr)
-            nz = kept.numel()
-            for qb in quant_bits:
-                _, mse = uniform_quantize(kept.clone(), qb)
-                bits = mdl_code_length_bits(n_params=n_params, nz=nz, value_bits=qb, index_bits_exact=False)
-                # PAC-Bayes bound: Δ ≈ sqrt((KL+ln(2√n/δ))/2(n-1)), KL≈bits/ln2
-                n = len(train_ds)
-                delta = 0.05 #?
-                KL = bits / math.log(2)   # convert bits -> nats
-                bound = math.sqrt((KL + math.log(2*math.sqrt(n)/delta)) / (2*(n-1)))
-                #rows.append((kr, qb, nz, bits, bound, mse))
-                rows.append({"keep_ratio":kr, "quantbit":qb, "kept":nz, "mdlbit":bits, "mdlbound":bound, "mse":mse})
-                print(f"[A] keep={kr:.2f}, q={qb}bits -> nz={nz}, bits={bits}, Δ≈{bound:.4f}, qMSE={mse:.2e}",file=fp)
-    
-    df=pd.DataFrame.from_records(rows)
-    pg=sns.pairplot(df)
-    pg.savefig("")
+            print(f"[A] empirical Cross Entropy gap = {gap:.4f}",file=fp)
+            print(f"[batch_size={batch_size}",file=fp)
+            print(f"[A] trained base: train_acc={tr_acc:.3f}, test_acc={te_acc:.3f}",file=fp)
+            rows = []
+            for kr in keep_ratio_list:
+                _, kept = util.global_magnitude_prune(model, keep_ratio=kr)
+                nz = kept.numel()
+                for qb in quant_bits:
+                    _, mse = uniform_quantize(kept.clone(), qb)
+                    bits = mdl_code_length_bits(n_params=n_params, nz=nz, value_bits=qb, index_bits_exact=False)
+                    # PAC-Bayes bound: Δ ≈ sqrt((KL+ln(2√n/δ))/2(n-1)), KL≈bits/ln2
+                    n = len(train_ds)
+                    delta = 0.05 #?
+                    KL = bits / math.log(2)   # convert bits -> nats
+                    bound = math.sqrt((KL + math.log(2*math.sqrt(n)/delta)) / (2*(n-1)))
+                    rows.append({"keep_ratio":kr, "quantbit":qb, "kept":nz, "mdlbit":bits, "mdlbound":bound, "mse":mse,"gap":gap})
+                    print(f"[A] {rows[-1]}",file=fp)
+        
+            pg=sns.pairplot(pd.DataFrame.from_records(rows))
+            pg.savefig(f"critics_A_pacmdl_{model_type}_{dataset}_layernum{layernum}.png")
 
-    # quick plot: bound vs keep ratio
-    fig, ax = plt.subplots()
-    for qb in quant_bits:
-        xs = [r["keep_ratio"] for r in rows if r["quantbit"]==qb]
-        ys = [r["mdlbound"] for r in rows if r["quantbit"]==qb]
-        ax.plot(xs, ys, marker="o", label=f"{qb} bits")
-    ax.set_xlabel("keep ratio (global magnitude prune)")
-    ax.set_ylabel("PAC-MDL bound Δ is(approx)")
-    ax.set_title("A) Compression-as-prior PAC-MDL bound")
-    ax.legend()
-    save_plot(fig, f"critics_A_pacmdl_{model_type}")
 
 # ===================================================
 # B)  Parity complexity + noise + width sweep
@@ -408,11 +413,11 @@ def exp_F(dataset="mnist", device="cpu",
 
     fig, ax = plt.subplots()
     for noise in noise_list:
-        tr_loader = build_loader_from_subset(train_sub, batch_size=128, noise=noise, n_classes=n_classes, shuffle=True)
-        te_loader = build_loader_from_subset(test_sub,  batch_size=256, noise=0.0,   n_classes=n_classes, shuffle=False)  # test is clean
+        tr_loader = util.build_loader_from_subset(train_sub, batch_size=128, noise=noise, n_classes=n_classes, shuffle=True)
+        te_loader = util.build_loader_from_subset(test_sub,  batch_size=256, noise=0.0,   n_classes=n_classes, shuffle=False)  # test is clean
         test_errs, train_errs = [], []
         for w in widths:
-            model = MLP(in_dim=in_dim, n_classes=n_classes, width=w, depth=3).to(device)
+            model = util.MLP(in_dim=in_dim, n_classes=n_classes, width=w, depth=3).to(device)
             tr_acc, te_acc = train_torch(model, tr_loader, te_loader, device, epochs=epochs, lr=lr, wd=1e-4)
             train_errs.append(1 - tr_acc);  test_errs.append(1 - te_acc)
             print(f"[F] noise={noise:.2f}, width={w}: train={tr_acc:.3f}, test={te_acc:.3f}")
@@ -451,8 +456,12 @@ def main():
     args = parser.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() or "cpu" in args.device else "cpu")
     if args.exp == "A":
-        exp_A(device=device, keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4,1),batch_size=128,model_type="mlp")
-        exp_A(device=device, keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4,1),batch_size=128,model_type="cnn")
+#        for model in ["mlp","cnn","resnet50"]:
+#            for dataset in ["mnist","cifar10","cifar100"]:
+        for dataset in ["mnist","cifar10"]:
+            for model in ["resnet50"]:
+                exp_A(device=device, keep_ratio_list=(0.1,0.2,0.4,0.8), quant_bits=(8,6,4,1),batch_size=128,
+                      layernums=[1,2,3,4,5], model_type=model,dataset=dataset)
     elif args.exp == "B":
         exp_B(device=device, max_complexity=args.max_complexity)
     elif args.exp == "C":
