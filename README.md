@@ -61,7 +61,7 @@ https://docs.google.com/presentation/d/1TLnCElJZAcqm3ZK8ANj3iHNT8-OXl1MHJysPhEto
     ![](figs/critics_C_soft_vs_hard.png)
     ソフト拡張(データの持つ構造)は
 
-- D: SGDの単純性バイアス：バッチ/学習率でマージンとノルムがどう動くかを観測
+- D: [SGDの単純性バイアス](https://tech.preferred.jp/ja/blog/implicit-bias/)：バッチ/学習率でマージンとノルムがどう動くかを観測
     ![](figs/critics_D_margin_norm.png)
 
 - E: ヘッシアン(固有ベクトルの縮退)退化、近零固有値比、と汎化ギャップの関係）を小規模で観測
